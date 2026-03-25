@@ -3,70 +3,90 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SmartPantry Cloud - ניהול מלאי חכם</title>
-    <!-- Tailwind CSS -->
+    <title>SmartPantry - ניהול חשבוניות ומלאי AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Google Fonts: Heebo for Hebrew -->
     <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;700;900&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Heebo', sans-serif; }
-        .glass-nav {
-            background: rgba(17, 24, 39, 0.9);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
+        .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(12px); }
+        .loader {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #2563eb;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
         }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body class="bg-slate-50 text-gray-900">
     <div id="root"></div>
 
-    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, onAuthStateChanged, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import React, { useState, useEffect, useMemo, useRef } from "https://esm.sh/react@18.2.0";
         import ReactDOM from "https://esm.sh/react-dom@18.2.0/client";
         import * as LucideIcons from "https://esm.sh/lucide-react@0.344.0";
 
-        // --- Firebase Configuration ---
-        const firebaseConfig = {
-            apiKey: "AIzaSyCcPBoY1804EzP1VRcMmb-Tb6EqkD5_4z8",
-            authDomain: "smartpantry-1ff7c.firebaseapp.com",
-            projectId: "smartpantry-1ff7c",
-            storageBucket: "smartpantry-1ff7c.firebasestorage.app",
-            messagingSenderId: "894209068764",
-            appId: "1:894209068764:web:1c5d402c50ff110744ee19",
-            measurementId: "G-9FKNYB6852"
-        };
+        const { 
+            Camera, Receipt, Package, Minus, Plus, Trash2, Edit2, 
+            Upload, LayoutDashboard, History, Download, Filter, 
+            Calendar, Tag, X, Save, Search, ChevronDown, CheckCircle2
+        } = LucideIcons;
 
+        // --- Firebase & AI Setup ---
+        const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = "smart-pantry-prod";
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'pantry-ai-prod';
+        
+        // ה-API Key שלך מהתמונה
+        const apiKey = "AIzaSyDbGtzd4_Q6Vd346hh84A81ugtHGaWHHYo"; 
 
-        const { 
-            Camera, Receipt, Package, Minus, Plus, Trash2, Edit2, 
-            Upload, Cloud, RefreshCw, LayoutDashboard, Layers, 
-            Wallet, History, LogOut, CheckCircle2, MoreVertical, PieChart, BarChart3
-        } = LucideIcons;
+        // Helper for Exponential Backoff
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) return await response.json();
+                    if (response.status === 429) {
+                        await new Promise(res => setTimeout(res, Math.pow(2, i) * 1000));
+                        continue;
+                    }
+                    throw new Error(`Status: ${response.status}`);
+                } catch (err) {
+                    if (i === maxRetries - 1) throw err;
+                    await new Promise(res => setTimeout(res, Math.pow(2, i) * 1000));
+                }
+            }
+        }
 
         function App() {
             const [user, setUser] = useState(null);
             const [activeTab, setActiveTab] = useState('dashboard');
-            const [receiptSubTab, setReceiptSubTab] = useState('history');
-            const [showProfileMenu, setShowProfileMenu] = useState(false);
             const [inventory, setInventory] = useState({});
             const [receipts, setReceipts] = useState([]);
-            const [categories, setCategories] = useState(["מזון", "נקיון", "כלי בית", "ירקות ופירות", "שונות"]);
-            const [isSyncing, setIsSyncing] = useState(false);
-            const [editingItemKey, setEditingItemKey] = useState(null);
-            const [isAddingItem, setIsAddingItem] = useState(false);
+            const [isScanning, setIsScanning] = useState(false);
+            const [scanStatus, setScanStatus] = useState("");
+            
+            // Filtering State
+            const [filterMonth, setFilterMonth] = useState('all');
+            const [filterCategory, setFilterCategory] = useState('all');
+            const [editingReceipt, setEditingReceipt] = useState(null);
+
             const fileInputRef = useRef(null);
 
             useEffect(() => {
                 const initAuth = async () => {
-                    try { await signInAnonymously(auth); } catch (e) { console.error(e); }
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
                 };
                 initAuth();
                 return onAuthStateChanged(auth, setUser);
@@ -74,142 +94,285 @@
 
             useEffect(() => {
                 if (!user) return;
-                setIsSyncing(true);
                 const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'pantryData', 'main');
                 return onSnapshot(userDocRef, (snap) => {
                     if (snap.exists()) {
                         const data = snap.data();
-                        if (data.inventory) setInventory(data.inventory);
-                        if (data.receipts) setReceipts(data.receipts);
-                        if (data.categories) setCategories(data.categories);
+                        setInventory(data.inventory || {});
+                        setReceipts(data.receipts || []);
                     }
-                    setIsSyncing(false);
                 });
             }, [user]);
 
             const saveToCloud = async (newData) => {
                 if (!user) return;
-                setIsSyncing(true);
-                try {
-                    const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'pantryData', 'main');
-                    await setDoc(userDocRef, newData, { merge: true });
-                } finally { setIsSyncing(false); }
+                const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'pantryData', 'main');
+                await setDoc(userDocRef, newData, { merge: true });
             };
 
-            const stats = useMemo(() => {
-                let total = 0;
-                const catTotals = {};
-                receipts.forEach(r => {
-                    total += r.total;
-                    r.items?.forEach(i => {
-                        catTotals[i.category] = (catTotals[i.category] || 0) + i.price;
-                    });
-                });
-                return { total, catTotals };
-            }, [receipts]);
+            // --- AI Analysis ---
+            const analyzeReceipt = async (base64) => {
+                setIsScanning(true);
+                setScanStatus("Gemini מנתח את החשבונית...");
+                
+                const prompt = `Analyze this receipt. The receipt is in Hebrew. Return ONLY a JSON object: 
+                { "store": string, "date": "YYYY-MM-DD", "total": number, 
+                  "items": [{ "name": string, "quantity": number, "price": number, "category": "מזון" | "נקיון" | "פירות וירקות" | "אחר" }] }`;
 
-            return React.createElement('div', { className: "min-h-screen pb-40" },
+                try {
+                    const result = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/png", data: base64 } }] }]
+                        })
+                    });
+
+                    const text = result.candidates[0].content.parts[0].text;
+                    const jsonString = text.match(/\{[\s\S]*\}/)[0];
+                    const data = JSON.parse(jsonString);
+
+                    const newReceipt = { ...data, id: Date.now().toString() };
+                    const updatedReceipts = [newReceipt, ...receipts];
+                    
+                    const updatedInventory = { ...inventory };
+                    data.items.forEach(item => {
+                        const existing = updatedInventory[item.name] || { quantity: 0, category: item.category };
+                        updatedInventory[item.name] = {
+                            ...existing,
+                            quantity: existing.quantity + (item.quantity || 1),
+                            lastPrice: item.price,
+                            category: item.category
+                        };
+                    });
+
+                    setReceipts(updatedReceipts);
+                    setInventory(updatedInventory);
+                    await saveToCloud({ receipts: updatedReceipts, inventory: updatedInventory });
+                    
+                    setScanStatus("החשבונית נקלטה בהצלחה!");
+                    setTimeout(() => { setIsScanning(false); setActiveTab('receipts'); }, 1500);
+                } catch (err) {
+                    console.error(err);
+                    setScanStatus("שגיאה בניתוח. וודא שהצילום ברור.");
+                    setTimeout(() => setIsScanning(false), 3000);
+                }
+            };
+
+            const handleFile = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onloadend = () => analyzeReceipt(reader.result.split(',')[1]);
+                reader.readAsDataURL(file);
+            };
+
+            // --- Computed Data ---
+            const filteredReceipts = useMemo(() => {
+                return receipts.filter(r => {
+                    const m = filterMonth === 'all' || r.date.startsWith(filterMonth);
+                    const c = filterCategory === 'all' || r.items.some(i => i.category === filterCategory);
+                    return m && c;
+                });
+            }, [receipts, filterMonth, filterCategory]);
+
+            const months = useMemo(() => [...new Set(receipts.map(r => r.date.substring(0, 7)))].sort().reverse(), [receipts]);
+
+            const downloadData = () => {
+                const csvContent = "data:text/csv;charset=utf-8,\ufeff" 
+                    + "תאריך,חנות,סה\"כ,פריטים\n"
+                    + filteredReceipts.map(r => `${r.date},${r.store},${r.total},"${r.items.map(i => i.name).join(' | ')}"`).join("\n");
+                
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement("a");
+                link.setAttribute("href", encodedUri);
+                link.setAttribute("download", `חשבוניות_${filterMonth}.csv`);
+                document.body.appendChild(link);
+                link.click();
+            };
+
+            return React.createElement('div', { className: "min-h-screen pb-32" },
                 // Header
-                React.createElement('header', { className: "bg-white/80 backdrop-blur-md sticky top-0 z-50 border-b h-20 px-6 flex items-center justify-between" },
-                    React.createElement('div', { className: "flex items-center gap-3" },
+                React.createElement('header', { className: "bg-white border-b h-20 px-6 flex items-center justify-between sticky top-0 z-40 shadow-sm" },
+                    React.createElement('div', { className: "flex items-center gap-2" },
                         React.createElement('div', { className: "bg-blue-600 p-2 rounded-xl text-white shadow-lg" }, React.createElement(Package, { size: 24 })),
-                        React.createElement('h1', { className: "font-black text-2xl" }, "Smart", React.createElement('span', { className: "text-blue-600" }, "Pantry"))
+                        React.createElement('h1', { className: "text-2xl font-black tracking-tight" }, "Smart", React.createElement('span', { className: "text-blue-600" }, "Pantry"))
                     ),
-                    React.createElement('div', { className: "flex items-center gap-4" },
-                        React.createElement('div', { className: "hidden sm:flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold border" },
-                            React.createElement('div', { className: `w-2 h-2 rounded-full ${isSyncing ? 'bg-orange-400 animate-pulse' : 'bg-emerald-500'}` }),
-                            isSyncing ? "מעדכן..." : "מסונכרן"
-                        ),
-                        React.createElement('button', { 
-                            onClick: () => setShowProfileMenu(!showProfileMenu),
-                            className: "w-12 h-12 rounded-xl bg-blue-50 border-2 border-white shadow-lg overflow-hidden"
-                        }, React.createElement('img', { src: `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.uid}` }))
+                    React.createElement('div', { className: "flex items-center gap-3" },
+                        React.createElement('div', { className: "hidden md:block text-[10px] bg-emerald-50 text-emerald-600 font-bold px-3 py-1 rounded-full border border-emerald-100" }, "מחובר לענן"),
+                        React.createElement('div', { className: "w-10 h-10 rounded-full bg-blue-50 border-2 border-white shadow-sm flex items-center justify-center text-blue-600 font-bold" }, user?.uid?.substring(0,2).toUpperCase())
                     )
                 ),
 
-                // Main Content
-                React.createElement('main', { className: "max-w-5xl mx-auto p-6" },
-                    activeTab === 'dashboard' && React.createElement('div', { className: "space-y-6" },
-                        React.createElement('div', { className: "bg-gradient-to-br from-blue-700 to-indigo-900 p-8 rounded-[2.5rem] text-white shadow-2xl" },
-                            React.createElement('p', { className: "text-blue-200 text-sm font-bold" }, "הוצאה כוללת"),
-                            React.createElement('h3', { className: "text-4xl font-black mt-1" }, `₪${stats.total.toLocaleString()}`),
-                            React.createElement('div', { className: "mt-4 flex items-center gap-2 text-xs opacity-70" }, React.createElement(CheckCircle2, { size: 14 }), "כל הנתונים שמורים ב-Cloud")
-                        ),
-                        React.createElement('div', { className: "bg-white p-6 rounded-[2.5rem] shadow-sm border" },
-                            React.createElement('h3', { className: "font-black text-xl mb-4 flex items-center gap-2" }, React.createElement(History, { size: 20, className: "text-blue-600" }), "פעילות אחרונה"),
-                            receipts.slice(0, 3).map(r => React.createElement('div', { key: r.id, className: "flex justify-between py-3 border-b last:border-0" },
-                                React.createElement('div', null, React.createElement('p', { className: "font-bold" }, r.store), React.createElement('p', { className: "text-xs text-gray-400" }, r.date)),
-                                React.createElement('p', { className: "font-black" }, `₪${r.total}`)
-                            ))
-                        )
-                    ),
-
-                    activeTab === 'inventory' && React.createElement('div', { className: "space-y-6" },
-                        React.createElement('div', { className: "flex justify-between items-center" },
-                            React.createElement('h2', { className: "text-3xl font-black" }, "המזווה שלי"),
-                            React.createElement('button', { onClick: () => setIsAddingItem(true), className: "bg-blue-600 text-white px-6 py-3 rounded-2xl font-black flex items-center gap-2" }, React.createElement(Plus, { size: 20 }), "הוסף מוצר")
-                        ),
-                        React.createElement('div', { className: "bg-white rounded-[2.5rem] shadow-sm border overflow-hidden" },
-                            React.createElement('table', { className: "w-full text-right" },
-                                React.createElement('thead', { className: "bg-gray-50 text-[11px] font-black text-gray-400 uppercase tracking-widest border-b" },
-                                    React.createElement('tr', null, 
-                                        React.createElement('th', { className: "p-6" }, "מוצר"),
-                                        React.createElement('th', { className: "p-6" }, "כמות"),
-                                        React.createElement('th', { className: "p-6" }, "מחיר")
+                React.createElement('main', { className: "max-w-4xl mx-auto p-4 md:p-8" },
+                    
+                    // Dashboard View
+                    activeTab === 'dashboard' && React.createElement('div', { className: "space-y-6 animate-in fade-in" },
+                        React.createElement('div', { className: "bg-gradient-to-br from-blue-700 via-blue-600 to-indigo-800 rounded-[2.5rem] p-10 text-white shadow-2xl relative overflow-hidden" },
+                            React.createElement('div', { className: "relative z-10" },
+                                React.createElement('p', { className: "text-blue-100 font-bold text-sm uppercase tracking-wider" }, "סה\"כ הוצאות"),
+                                React.createElement('h2', { className: "text-6xl font-black mt-2" }, `₪${receipts.reduce((a, b) => a + (b.total || 0), 0).toLocaleString()}`),
+                                React.createElement('div', { className: "mt-8 flex gap-3" },
+                                    React.createElement('div', { className: "bg-white/10 backdrop-blur px-5 py-2 rounded-2xl border border-white/10" }, 
+                                        React.createElement('p', { className: "text-[10px] opacity-60 font-bold" }, "חשבוניות"),
+                                        React.createElement('p', { className: "text-lg font-bold" }, receipts.length)
+                                    ),
+                                    React.createElement('div', { className: "bg-white/10 backdrop-blur px-5 py-2 rounded-2xl border border-white/10" }, 
+                                        React.createElement('p', { className: "text-[10px] opacity-60 font-bold" }, "פריטים"),
+                                        React.createElement('p', { className: "text-lg font-bold" }, Object.keys(inventory).length)
                                     )
-                                ),
-                                React.createElement('tbody', { className: "divide-y" },
-                                    Object.entries(inventory).map(([name, data]) => React.createElement('tr', { key: name, className: "hover:bg-blue-50/20" },
-                                        React.createElement('td', { className: "p-6 font-bold" }, name),
-                                        React.createElement('td', { className: "p-6" }, React.createElement('div', { className: "flex items-center gap-3" },
-                                            React.createElement('button', { onClick: () => {
-                                                const n = {...inventory, [name]: {...data, quantity: Math.max(0, data.quantity-1)}};
-                                                setInventory(n); saveToCloud({inventory: n});
-                                            }, className: "w-8 h-8 border rounded-lg flex items-center justify-center" }, React.createElement(Minus, { size: 14 })),
-                                            React.createElement('span', { className: "font-black" }, data.quantity),
-                                            React.createElement('button', { onClick: () => {
-                                                const n = {...inventory, [name]: {...data, quantity: data.quantity+1}};
-                                                setInventory(n); saveToCloud({inventory: n});
-                                            }, className: "w-8 h-8 bg-blue-600 text-white rounded-lg flex items-center justify-center" }, React.createElement(Plus, { size: 14 }))
-                                        )),
-                                        React.createElement('td', { className: "p-6 font-black" }, `₪${data.priceHistory?.slice(-1)[0]?.price || 0}`)
-                                    ))
                                 )
+                            ),
+                            React.createElement('div', { className: "absolute -bottom-10 -left-10 opacity-10 rotate-12" }, React.createElement(Wallet, { size: 240 }))
+                        ),
+                        React.createElement('div', { className: "grid grid-cols-1 md:grid-cols-2 gap-6" },
+                            React.createElement('div', { className: "bg-white p-6 rounded-[2rem] border shadow-sm" },
+                                React.createElement('h3', { className: "font-black flex items-center gap-2 mb-4 text-slate-800" }, React.createElement(History, { size: 18, className: "text-blue-500" }), "רכישות אחרונות"),
+                                receipts.length > 0 ? receipts.slice(0, 3).map(r => React.createElement('div', { key: r.id, className: "flex justify-between py-4 border-b last:border-0" },
+                                    React.createElement('div', null, React.createElement('p', { className: "font-bold text-sm" }, r.store), React.createElement('p', { className: "text-[10px] text-gray-400 font-bold" }, r.date)),
+                                    React.createElement('p', { className: "font-black text-slate-700" }, `₪${r.total}`)
+                                )) : React.createElement('p', { className: "text-center py-8 text-slate-300 font-bold" }, "אין נתונים להצגה")
+                            ),
+                            React.createElement('div', { className: "bg-white p-6 rounded-[2rem] border shadow-sm" },
+                                React.createElement('h3', { className: "font-black flex items-center gap-2 mb-4 text-slate-800" }, React.createElement(Tag, { size: 18, className: "text-emerald-500" }), "מוצרים במלאי"),
+                                Object.entries(inventory).slice(0, 3).map(([name, data]) => React.createElement('div', { key: name, className: "flex justify-between py-4 border-b last:border-0" },
+                                    React.createElement('p', { className: "font-bold text-sm" }, name),
+                                    React.createElement('p', { className: "font-black text-blue-600 bg-blue-50 px-3 py-1 rounded-lg" }, data.quantity)
+                                ))
                             )
                         )
                     ),
 
-                    activeTab === 'scanner' && React.createElement('div', { className: "max-w-md mx-auto py-12 space-y-8" },
-                        React.createElement('div', { className: "text-center space-y-2" },
-                            React.createElement('h2', { className: "text-3xl font-black" }, "סורק חכם"),
-                            React.createElement('p', { className: "text-gray-400 font-bold" }, "סרוק חשבונית לעדכון המלאי")
+                    // Inventory View
+                    activeTab === 'inventory' && React.createElement('div', { className: "space-y-6 animate-in slide-in-from-bottom-4" },
+                        React.createElement('div', { className: "flex justify-between items-center" },
+                            React.createElement('h2', { className: "text-3xl font-black" }, "ניהול המזווה"),
+                            React.createElement('button', { className: "bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:bg-blue-700 transition-colors" }, "+ הוספה ידנית")
                         ),
-                        React.createElement('div', { className: "bg-white border-4 border-dashed rounded-[3.5rem] p-16 text-center cursor-pointer hover:bg-blue-50 transition-all group" },
-                            React.createElement('div', { className: "w-24 h-24 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-6 shadow-xl" }, React.createElement(Camera, { size: 48 })),
-                            React.createElement('h3', { className: "text-xl font-black" }, "פתח מצלמה")
+                        React.createElement('div', { className: "grid grid-cols-1 gap-3" },
+                            Object.entries(inventory).map(([name, data]) => React.createElement('div', { key: name, className: "bg-white p-6 rounded-[2rem] border flex justify-between items-center group shadow-sm hover:border-blue-200 transition-colors" },
+                                React.createElement('div', null, 
+                                    React.createElement('h4', { className: "font-black text-lg text-slate-800" }, name),
+                                    React.createElement('span', { className: "text-[10px] bg-slate-100 text-slate-500 px-2 py-1 rounded-md font-bold uppercase tracking-wide" }, data.category || "אחר")
+                                ),
+                                React.createElement('div', { className: "flex items-center gap-4" },
+                                    React.createElement('button', { onClick: async () => {
+                                        const n = {...inventory, [name]: {...data, quantity: Math.max(0, data.quantity-1)}};
+                                        setInventory(n); await saveToCloud({inventory: n});
+                                    }, className: "w-11 h-11 bg-slate-50 rounded-2xl flex items-center justify-center border hover:bg-red-50 hover:text-red-500 transition-colors" }, React.createElement(Minus, { size: 16 })),
+                                    React.createElement('span', { className: "text-2xl font-black w-8 text-center text-slate-700" }, data.quantity),
+                                    React.createElement('button', { onClick: async () => {
+                                        const n = {...inventory, [name]: {...data, quantity: data.quantity+1}};
+                                        setInventory(n); await saveToCloud({inventory: n});
+                                    }, className: "w-11 h-11 bg-blue-600 text-white rounded-2xl flex items-center justify-center shadow-lg hover:bg-blue-700 transition-transform active:scale-95" }, React.createElement(Plus, { size: 16 }))
+                                )
+                            ))
+                        )
+                    ),
+
+                    // Receipts Tab
+                    activeTab === 'receipts' && React.createElement('div', { className: "space-y-6 animate-in fade-in" },
+                        React.createElement('div', { className: "flex justify-between items-center px-2" },
+                            React.createElement('h2', { className: "text-3xl font-black" }, "ארכיון חשבוניות"),
+                            React.createElement('button', { onClick: downloadData, className: "p-3 bg-white border rounded-2xl text-slate-400 hover:text-blue-600 shadow-sm transition-colors" }, React.createElement(Download, { size: 20 }))
                         ),
-                        React.createElement('button', { onClick: () => fileInputRef.current.click(), className: "w-full bg-white border p-6 rounded-[2rem] flex items-center justify-center gap-3 font-black text-gray-600" },
-                            React.createElement(Upload, { size: 24, className: "text-blue-600" }), "העלאת קובץ מהגלריה"
+                        
+                        // Filters
+                        React.createElement('div', { className: "bg-white p-5 rounded-[2rem] border flex flex-wrap gap-4 shadow-sm" },
+                            React.createElement('div', { className: "flex-1 min-w-[160px] bg-slate-50 p-3.5 rounded-2xl flex items-center gap-2 border border-slate-100 focus-within:border-blue-400 transition-colors" },
+                                React.createElement(Calendar, { size: 18, className: "text-slate-400" }),
+                                React.createElement('select', { value: filterMonth, onChange: e => setFilterMonth(e.target.value), className: "bg-transparent border-none w-full text-sm font-bold focus:ring-0 outline-none" },
+                                    React.createElement('option', { value: 'all' }, "כל החודשים"),
+                                    months.map(m => React.createElement('option', { key: m, value: m }, m))
+                                )
+                            ),
+                            React.createElement('div', { className: "flex-1 min-w-[160px] bg-slate-50 p-3.5 rounded-2xl flex items-center gap-2 border border-slate-100 focus-within:border-blue-400 transition-colors" },
+                                React.createElement(Tag, { size: 18, className: "text-slate-400" }),
+                                React.createElement('select', { value: filterCategory, onChange: e => setFilterCategory(e.target.value), className: "bg-transparent border-none w-full text-sm font-bold focus:ring-0 outline-none" },
+                                    React.createElement('option', { value: 'all' }, "כל הקטגוריות"),
+                                    ["מזון", "נקיון", "פירות וירקות", "אחר"].map(c => React.createElement('option', { key: c, value: c }, c))
+                                )
+                            )
                         ),
-                        React.createElement('input', { type: "file", ref: fileInputRef, className: "hidden", accept: "image/*" })
+
+                        // List
+                        React.createElement('div', { className: "space-y-4" },
+                            filteredReceipts.length > 0 ? filteredReceipts.map(r => React.createElement('div', { key: r.id, className: "bg-white p-7 rounded-[2.5rem] border shadow-sm group hover:border-blue-100 transition-colors" },
+                                React.createElement('div', { className: "flex justify-between items-start" },
+                                    React.createElement('div', { className: "flex gap-5" },
+                                        React.createElement('div', { className: "w-14 h-14 bg-blue-50 text-blue-600 rounded-[1.2rem] flex items-center justify-center font-bold" }, React.createElement(Receipt, { size: 28 })),
+                                        React.createElement('div', null, 
+                                            React.createElement('h4', { className: "font-black text-xl text-slate-800" }, r.store),
+                                            React.createElement('p', { className: "text-sm text-slate-400 font-bold" }, r.date)
+                                        )
+                                    ),
+                                    React.createElement('div', { className: "text-left" },
+                                        React.createElement('p', { className: "text-2xl font-black text-blue-600" }, `₪${r.total}`),
+                                        React.createElement('div', { className: "flex gap-3 mt-3 opacity-0 group-hover:opacity-100 transition-opacity" },
+                                            React.createElement('button', { onClick: () => setEditingReceipt(r), className: "p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-blue-500" }, React.createElement(Edit2, { size: 16 })),
+                                            React.createElement('button', { onClick: async () => { if(confirm('למחוק חשבונית זו?')) { const n=receipts.filter(x=>x.id!==r.id); setReceipts(n); await saveToCloud({receipts:n}); } }, className: "p-2 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500" }, React.createElement(Trash2, { size: 16 }))
+                                        )
+                                    )
+                                ),
+                                React.createElement('div', { className: "mt-6 pt-6 border-t border-slate-50 flex flex-wrap gap-2" },
+                                    r.items.map((item, i) => React.createElement('div', { key: i, className: "flex items-center gap-2 bg-slate-50 border border-slate-100 px-3 py-1.5 rounded-xl" },
+                                        React.createElement('span', { className: "text-[11px] text-slate-700 font-bold" }, item.name),
+                                        React.createElement('span', { className: "text-[10px] text-blue-500 font-black" }, `x${item.quantity}`)
+                                    ))
+                                )
+                            )) : React.createElement('div', { className: "text-center py-20 bg-white rounded-[2.5rem] border border-dashed" },
+                                React.createElement(History, { size: 48, className: "mx-auto text-slate-200 mb-4" }),
+                                React.createElement('p', { className: "text-slate-400 font-bold" }, "אין חשבוניות התואמות לסינון")
+                            )
+                        )
+                    ),
+
+                    // Scanner View
+                    activeTab === 'scanner' && React.createElement('div', { className: "max-w-md mx-auto py-12" },
+                        isScanning ? React.createElement('div', { className: "bg-white p-16 rounded-[4rem] border-2 border-blue-100 shadow-2xl text-center space-y-8" },
+                            React.createElement('div', { className: "loader mx-auto" }),
+                            React.createElement('div', { className: "space-y-2" },
+                                React.createElement('h3', { className: "text-2xl font-black text-blue-600 animate-pulse" }, scanStatus),
+                                React.createElement('p', { className: "text-slate-400 text-sm font-bold" }, "תהליך זה עשוי לקחת מספר שניות...")
+                            )
+                        ) : React.createElement('div', { className: "space-y-8 animate-in zoom-in-95" },
+                            React.createElement('div', { className: "text-center space-y-3" },
+                                React.createElement('div', { className: "inline-flex items-center gap-2 bg-blue-50 text-blue-600 px-4 py-1.5 rounded-full text-[11px] font-black uppercase tracking-widest mb-2 shadow-sm" }, 
+                                    React.createElement(CheckCircle2, { size: 14 }), "Gemini AI Live"
+                                ),
+                                React.createElement('h2', { className: "text-4xl font-black text-slate-800" }, "סריקת חשבונית"),
+                                React.createElement('p', { className: "text-slate-400 font-bold" }, "השתמש בבינה מלאכותית כדי לעדכן את המלאי שלך")
+                            ),
+                            React.createElement('div', { 
+                                onClick: () => fileInputRef.current.click(),
+                                className: "bg-white border-4 border-dashed border-slate-100 rounded-[4rem] p-24 text-center cursor-pointer hover:bg-blue-50 hover:border-blue-400 transition-all group shadow-xl shadow-blue-50/10"
+                            },
+                                React.createElement('div', { className: "w-28 h-28 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-8 shadow-2xl group-hover:scale-110 transition-transform duration-300" }, React.createElement(Camera, { size: 44 })),
+                                React.createElement('h4', { className: "font-black text-2xl text-slate-700" }, "לחץ לצילום חשבונית"),
+                                React.createElement('p', { className: "text-slate-400 mt-4 text-sm font-bold" }, "PDF, JPG או PNG")
+                            ),
+                            React.createElement('input', { type: "file", ref: fileInputRef, className: "hidden", accept: "image/*", onChange: handleFile })
+                        )
                     )
                 ),
 
                 // Floating Nav
-                React.createElement('div', { className: "fixed bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-md px-6" },
-                    React.createElement('nav', { className: "glass-nav px-8 py-5 rounded-[3rem] flex justify-between items-center shadow-2xl border border-white/10" },
+                React.createElement('div', { className: "fixed bottom-10 left-1/2 -translate-x-1/2 w-full max-w-md px-4 z-40" },
+                    React.createElement('nav', { className: "glass px-8 py-5 rounded-[2.5rem] flex justify-between items-center shadow-2xl border border-white/40 ring-1 ring-black/5" },
                         [
                             { id: 'dashboard', icon: LayoutDashboard, label: 'בית' },
                             { id: 'inventory', icon: Package, label: 'מלאי' },
                             { id: 'scanner', icon: Camera, label: 'סורק', center: true },
-                            { id: 'receipts', icon: Receipt, label: 'דוחות' }
+                            { id: 'receipts', icon: Receipt, label: 'חשבוניות' }
                         ].map(item => React.createElement('button', { 
                             key: item.id, 
                             onClick: () => setActiveTab(item.id),
-                            className: `flex flex-col items-center gap-1 transition-all ${item.center ? '-mt-20' : (activeTab === item.id ? 'text-blue-400 scale-110' : 'text-gray-500')}`
+                            className: `flex flex-col items-center gap-1 transition-all ${item.center ? '-mt-16' : (activeTab === item.id ? 'text-blue-600 scale-110' : 'text-slate-400 hover:text-slate-600')}`
                         }, 
-                            item.center ? React.createElement('div', { className: "bg-blue-600 p-5 rounded-full text-white shadow-2xl ring-8 ring-slate-50" }, React.createElement(item.icon, { size: 32 }))
-                            : React.createElement(React.Fragment, null, React.createElement(item.icon, { size: 24 }), React.createElement('span', { className: "text-[10px] font-black" }, item.label))
+                            item.center ? React.createElement('div', { className: "bg-blue-600 p-5 rounded-full text-white shadow-2xl ring-8 ring-slate-50 relative group" }, 
+                                React.createElement(item.icon, { size: 32 }),
+                                React.createElement('div', { className: "absolute inset-0 bg-blue-400 rounded-full blur-xl opacity-0 group-hover:opacity-40 transition-opacity" })
+                            )
+                            : React.createElement(React.Fragment, null, React.createElement(item.icon, { size: 22 }), React.createElement('span', { className: "text-[10px] font-black uppercase tracking-tighter" }, item.label))
                         ))
                     )
                 )

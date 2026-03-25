@@ -76,7 +76,6 @@
             // Filtering State
             const [filterMonth, setFilterMonth] = useState('all');
             const [filterCategory, setFilterCategory] = useState('all');
-            const [editingReceipt, setEditingReceipt] = useState(null);
 
             const fileInputRef = useRef(null);
 
@@ -89,19 +88,21 @@
                     }
                 };
                 initAuth();
-                return onAuthStateChanged(auth, setUser);
+                const unsubscribe = onAuthStateChanged(auth, setUser);
+                return () => unsubscribe();
             }, []);
 
             useEffect(() => {
                 if (!user) return;
                 const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'pantryData', 'main');
-                return onSnapshot(userDocRef, (snap) => {
+                const unsubscribe = onSnapshot(userDocRef, (snap) => {
                     if (snap.exists()) {
                         const data = snap.data();
                         setInventory(data.inventory || {});
                         setReceipts(data.receipts || []);
                     }
-                });
+                }, (error) => console.error("Firestore error:", error));
+                return () => unsubscribe();
             }, [user]);
 
             const saveToCloud = async (newData) => {
@@ -110,7 +111,6 @@
                 await setDoc(userDocRef, newData, { merge: true });
             };
 
-            // --- AI Analysis ---
             const analyzeReceipt = async (base64) => {
                 setIsScanning(true);
                 setScanStatus("Gemini מנתח את החשבונית...");
@@ -128,8 +128,10 @@
                     });
 
                     const text = result.candidates[0].content.parts[0].text;
-                    const jsonString = text.match(/\{[\s\S]*\}/)[0];
-                    const data = JSON.parse(jsonString);
+                    const jsonMatch = text.match(/\{[\s\S]*\}/);
+                    if (!jsonMatch) throw new Error("Could not parse AI response");
+                    
+                    const data = JSON.parse(jsonMatch[0]);
 
                     const newReceipt = { ...data, id: Date.now().toString() };
                     const updatedReceipts = [newReceipt, ...receipts];
@@ -166,7 +168,6 @@
                 reader.readAsDataURL(file);
             };
 
-            // --- Computed Data ---
             const filteredReceipts = useMemo(() => {
                 return receipts.filter(r => {
                     const m = filterMonth === 'all' || r.date.startsWith(filterMonth);
@@ -222,7 +223,7 @@
                                     )
                                 )
                             ),
-                            React.createElement('div', { className: "absolute -bottom-10 -left-10 opacity-10 rotate-12" }, React.createElement(Wallet, { size: 240 }))
+                            React.createElement('div', { className: "absolute -bottom-10 -left-10 opacity-10 rotate-12" }, React.createElement(Receipt, { size: 240 }))
                         ),
                         React.createElement('div', { className: "grid grid-cols-1 md:grid-cols-2 gap-6" },
                             React.createElement('div', { className: "bg-white p-6 rounded-[2rem] border shadow-sm" },
@@ -308,7 +309,6 @@
                                     React.createElement('div', { className: "text-left" },
                                         React.createElement('p', { className: "text-2xl font-black text-blue-600" }, `₪${r.total}`),
                                         React.createElement('div', { className: "flex gap-3 mt-3 opacity-0 group-hover:opacity-100 transition-opacity" },
-                                            React.createElement('button', { onClick: () => setEditingReceipt(r), className: "p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-blue-500" }, React.createElement(Edit2, { size: 16 })),
                                             React.createElement('button', { onClick: async () => { if(confirm('למחוק חשבונית זו?')) { const n=receipts.filter(x=>x.id!==r.id); setReceipts(n); await saveToCloud({receipts:n}); } }, className: "p-2 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500" }, React.createElement(Trash2, { size: 16 }))
                                         )
                                     )
